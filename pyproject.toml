@@ -1,0 +1,28 @@
+[project]
+name = "ann-course"
+version = "0.1.0"
+description = "A common environment for all labs"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.10.3",
+    "numpy>=1.26.4",
+    "opencv-python>=4.11.0.86",
+    "requests>=2.32.3",
+    "tensorboard>=2.19.0",
+    "torch==2.5.1+cu124",
+    "torchaudio==2.5.1+cu124",
+    "torchmetrics>=1.7.1",
+    "torchvision==0.20.1+cu124",
+    "tqdm>=4.67.1",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true

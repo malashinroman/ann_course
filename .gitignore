@@ -1,0 +1,12 @@
+*.pyc
+__pycache__/
+**/__pycache__/
+
+.vscode/
+.venv/
+
+glioma_mini/
+mnist/
+cifar10/
+runs/
+weights/

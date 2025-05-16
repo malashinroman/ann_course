@@ -1,17 +1,17 @@
 import torch
 from torch import nn, Tensor
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard.writer import SummaryWriter
 from torchvision import transforms, datasets
 import numpy as np
 
 import os
 from datetime import datetime
 from tqdm import tqdm
-from tensorboardX import SummaryWriter
 from typing import Tuple, List
 
 
-def get_data_loaders(batch_size: int, data_dir: str = ".") -> Tuple[DataLoader, DataLoader]:
+def get_data_loaders(batch_size: int, data_dir: str = "data") -> Tuple[DataLoader, DataLoader]:
     """Подготавливает загрузчики MNIST для обучения и тестирования."""
     transform = transforms.Compose([transforms.ToTensor()])
     train_dataset = datasets.MNIST(root=data_dir, train=True, transform=transform, download=True)
