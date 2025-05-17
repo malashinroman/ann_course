@@ -1,94 +1,183 @@
 import os
-from glob import glob
-from datetime import datetime
-
-from tqdm import tqdm
-from PIL import Image
-import matplotlib.pyplot as plt
-
-from typing import Callable, Dict, Literal, Optional, Tuple, List
-
 import random
-import numpy as np
+from datetime import datetime
+from glob import glob
+from typing import Callable, Literal
 
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torchvision import transforms
-from torchmetrics import JaccardIndex
 import torchvision.transforms.functional as TF
+from PIL import Image
+from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard.writer import SummaryWriter
-
+from torchmetrics import JaccardIndex
+from torchvision import transforms
+from tqdm import tqdm
 from utils import ensure_glioma_mini
 
 
-# Определение блока сверток
 class ConvBlock(nn.Module):
+    """
+    ConvBlock реализует два последовательных свёрточных слоя
+    с ядром 3×3 и паддингом 1, каждый из которых
+    следует за функцией активации ReLU.
+
+    Args:
+        in_channels (int): число каналов на входе.
+        out_channels (int): число каналов на выходе.
+
+    """
+
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            # Первая свёртка: in_channels → out_channels
+            nn.Conv2d(
+                in_channels, out_channels, kernel_size=3, padding=1, bias=False
+            ),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.ReLU(inplace=True)
+            # Вторая свёртка: out_channels → out_channels
+            nn.Conv2d(
+                out_channels, out_channels, kernel_size=3, padding=1, bias=False
+            ),
+            nn.ReLU(inplace=True),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Метод, вызываемый при прямом проходе модели.
+
+        Args:
+            x (Tensor): тензор формы [B, in_channels, H, W]
+
+        Returns:
+            Tensor: выход формы [B, out_channels, H, W]
+
+        """
         return self.conv(x)
 
-# Определение блока энкодера
+
 class EncoderBlock(nn.Module):
+    """
+    EncoderBlock включает ConvBlock и операцию MaxPool2d,
+    формируя шаг сжатия для U-Net.
+
+    Args:
+        in_channels (int): число входных каналов.
+        out_channels (int): число выходных каналов после ConvBlock.
+
+    """
+
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
+        # Сверточная часть (две свёртки + ReLU)
         self.conv = ConvBlock(in_channels, out_channels)
+        # Пулинг для уменьшения пространственных размеров в 2 раза
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
-    def forward(self, x):
-        x = self.conv(x)
-        pooled = self.pool(x)
-        return x, pooled
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Метод, вызываемый при прямом проходе модели.
 
-# Определение блока декодера
+        Args:
+            x (Tensor): входной тензор [B, in_channels, H, W]
+
+        Returns:
+            tuple:
+                - feature_map (Tensor): выход ConvBlock [B, out_channels, H, W]
+                - pooled (Tensor): результат MaxPool2d [B, out_channels, H/2, W/2]
+
+        """
+        feature_map = self.conv(x)
+        pooled = self.pool(feature_map)
+        return feature_map, pooled
+
+
 class DecoderBlock(nn.Module):
+    """
+    DecoderBlock выполняет upsampling с помощью ConvTranspose2d,
+    затем конкатенирует с feature-map из энкодера и прогоняет через ConvBlock.
+
+    Args:
+        in_channels (int): число каналов на входе (обычно из предыдущего декодера).
+        out_channels (int): число каналов после свёрток.
+
+    """
+
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
+        # Upsampling: увеличиваем H, W в 2 раза и уменьшаем каналы до out_channels
+        self.up = nn.ConvTranspose2d(
+            in_channels, out_channels, kernel_size=2, stride=2
+        )
+        # После конкатенации будет in_channels = out_channels(from up) + out_channels(from skip)
         self.conv = ConvBlock(in_channels, out_channels)
 
-    def forward(self, x, skip_connection):
-        x = self.up(x)
-        x = torch.cat([x, skip_connection], dim=1)
-        return self.conv(x)
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        """Метод, вызываемый при прямом проходе модели.
 
-# Определение U-Net модели
+        Args:
+            x (Tensor): входной тензор из предыдущего шага декодера [B, in_channels, H, W]
+            skip (Tensor): feature-map из соответствующего EncoderBlock [B, out_channels, H*2, W*2]
+
+        Returns:
+            Tensor: объединённый и свернутый выход [B, out_channels, H*2, W*2]
+
+        """
+        x = self.up(x)  # upsample
+        x = torch.cat([x, skip], dim=1)  # конкатенация по канальному измерению
+        return self.conv(x)  # две свёртки + ReLU
+
+
 class UNet(nn.Module):
+    """
+    U-Net для сегментации изображений.
+    Состоит из «сжимающей» (encoder) и «расширяющей» (decoder) частей,
+    соединённых скип-коннекшенами.
+
+    Args:
+        in_channels (int): число каналов входного изображения (например, 3 для RGB).
+        out_channels (int): число каналов выходной карты сегментации (классы).
+
+    """
+
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        # Реализовать UNet из блоков ConvBlock, EncoderBlock и DecoderBlock
-        raise NotImplementedError
-        
-    def forward(self, x):
-        # Последовательно запускать реализованные блоки из init
-        raise NotImplementedError
-        
+        # TODO: реализовать конструкцию U-Net из блоков EncoderBlock, DecoderBlock и ConvBlock
+        raise NotImplementedError(
+            "Пока не реализовано: соберите U-Net из блоков выше"
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Метод, реализующий прямой проход модели.
+
+        Args:
+            x (Tensor): входной тензор [B, in_channels, H, W]
+
+        Returns:
+            Tensor: выходная карта сегментации [B, out_channels, H, W]
+
+        """
+        # TODO: определить последовательность пропуска по энкодеру и декодеру
+        raise NotImplementedError("Forward U-Net пока не реализован")
+
 
 class CustomSegmentationDataset(Dataset):
     def __init__(
-            self,
-            images_dir: str,
-            masks_dir: str,
-            transform: Optional[Callable]=None,
-            preprocess: Optional[Callable]=None
-        ) -> None:
-        """
-        Кастомный датасет для загрузки изображений и масок.
+        self,
+        images_dir: str,
+        masks_dir: str,
+        transform: Callable | None = None,
+        preprocess: Callable | None = None,
+    ) -> None:
+        """Кастомный датасет для загрузки изображений и масок.
 
         Args:
             images_dir (str): Путь к папке с изображениями.
             masks_dir (str): Путь к папке с масками.
             transform (callable, optional): Трансформации для применения к изображениям и маскам.
             preprocess (callable, optional): Преобразования для применения только к изображениям.
+
         """
         self.image_paths = sorted(glob(images_dir))
         self.mask_paths = sorted(glob(masks_dir))
@@ -96,13 +185,15 @@ class CustomSegmentationDataset(Dataset):
         self.preprocess = preprocess
 
         # Список всех файлов изображений
-        self.images: List[Image.Image] = []
-        self.masks: List[Image.Image] = []
+        self.images: list[Image.Image] = []
+        self.masks: list[Image.Image] = []
 
         self.__load_data_to_memory()
 
     def __load_data_to_memory(self):
-        for image_path, mask_path in zip(self.image_paths, self.mask_paths):
+        for image_path, mask_path in zip(
+            self.image_paths, self.mask_paths, strict=True
+        ):
             # Открываем изображение и преобразуем в RGB
             with Image.open(image_path) as img:
                 image = img.convert("RGB")
@@ -117,7 +208,9 @@ class CustomSegmentationDataset(Dataset):
             # Применяем общие трансформации, если они заданы
             if self.transform is not None:
                 # Генерация seed для синхронизации случайных трансформаций
-                seed = np.random.randint(2147483647)  # Генерируем seed для синхронизации
+                seed = np.random.randint(
+                    2147483647
+                )  # Генерируем seed для синхронизации
                 self.__set_seed(seed=seed)
 
                 # Применение преобразований к изображению
@@ -139,24 +232,25 @@ class CustomSegmentationDataset(Dataset):
     def __len__(self):
         return len(self.images)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> tuple[Image.Image, Image.Image]:
         return self.images[index], self.masks[index]
 
 
 def get_train_transform() -> Callable:
-    return transforms.Compose([
-        transforms.Resize((512, 704)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(),
-        transforms.ToTensor()
-    ])
+    return transforms.Compose(
+        [
+            transforms.Resize((512, 704)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),
+            transforms.ToTensor(),
+        ]
+    )
 
 
 def get_valid_transform() -> Callable:
-    return transforms.Compose([
-        transforms.Resize((512, 704)),
-        transforms.ToTensor()
-    ])
+    return transforms.Compose(
+        [transforms.Resize((512, 704)), transforms.ToTensor()]
+    )
 
 
 def get_preprocess() -> Callable:
@@ -164,36 +258,38 @@ def get_preprocess() -> Callable:
 
 
 def __check_directory_exists(path: str) -> None:
-    assert os.path.exists(f"{path}"), f'Не найдена директория [{path}].'
+    assert os.path.exists(f"{path}"), f"Не найдена директория [{path}]."
 
 
-def get_train_dataset(transform: Callable, preprocess: Callable) -> CustomSegmentationDataset:
+def get_train_dataset(
+    transform: Callable, preprocess: Callable
+) -> CustomSegmentationDataset:
     folder = "glioma_mini/data/train"
     __check_directory_exists(folder)
     return CustomSegmentationDataset(
         images_dir=f"{folder}/images/*.tif",
         masks_dir=f"{folder}/masks/*.tif",
         transform=transform,
-        preprocess=preprocess
+        preprocess=preprocess,
     )
 
 
-def get_valid_dataset(transform: Callable, preprocess: Callable) -> CustomSegmentationDataset:
+def get_valid_dataset(
+    transform: Callable, preprocess: Callable
+) -> CustomSegmentationDataset:
     folder = "glioma_mini/data/valid"
     __check_directory_exists(folder)
     return CustomSegmentationDataset(
         images_dir=f"{folder}/images/*.tif",
         masks_dir=f"{folder}/masks/*.tif",
         transform=transform,
-        preprocess=preprocess
+        preprocess=preprocess,
     )
 
 
 def create_dataloaders(
-    train_dataset: Dataset,
-    val_dataset: Dataset,
-    batch_size: int = 5
-) -> Tuple[DataLoader, DataLoader]:
+    train_dataset: Dataset, val_dataset: Dataset, batch_size: int = 5
+) -> tuple[DataLoader, DataLoader]:
     """
     Создает загрузчики данных для обучающего, валидационного и тестового наборов.
 
@@ -203,9 +299,11 @@ def create_dataloaders(
         batch_size (int): Размер батча.
 
     Returns:
-        Tuple[DataLoader, DataLoader]: Загрузчики для обучающего и валидационного наборов.
+        tuple(DataLoader, DataLoader): Загрузчики для обучающего и валидационного наборов.
     """
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True
+    )
     valid_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     return train_loader, valid_loader
 
@@ -215,10 +313,10 @@ def run_one_epoch(
     criterion: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     data_loader: DataLoader,
-    phase: Literal['train', 'valid', 'test'],
+    phase: Literal["train", "valid", "test"],
     device: torch.device,
-    current_epoch: int = 0
-) -> Dict[str, float]:
+    current_epoch: int = 0,
+) -> dict[str, float]:
     """
     Оценивает модель на заданном наборе данных (train, valid, test).
 
@@ -232,30 +330,34 @@ def run_one_epoch(
         current_epoch (int): Номер текущей эпохи для отображения.
 
     Returns:
-        Dict[str, float]: Словарь с ключами 'loss' и 'iou'.
+        dict(str, float): Словарь с ключами 'loss' и 'iou'.
     """
     # Устанавливаем режим работы модели
-    if phase in ('valid', 'test'):
+    if phase in ("valid", "test"):
         model.eval()
     else:
         model.train()
 
     total_loss = 0.0
     total_iou = 0.0
-    jaccard = JaccardIndex(task='binary', threshold=0.5).to(device)
+    jaccard = JaccardIndex(task="binary", threshold=0.5).to(device)
 
     # Только для валидации и теста используем no_grad
-    context = torch.no_grad() if phase in ('valid', 'test') else torch.enable_grad()
+    context = (
+        torch.no_grad() if phase in ("valid", "test") else torch.enable_grad()
+    )
     with context:
-        for images, masks in tqdm(data_loader, desc=f"Epoch {current_epoch}", leave=False):
+        for images, masks in tqdm(
+            data_loader, desc=f"Epoch {current_epoch}", leave=False
+        ):
             images = images.to(device)
             masks = masks.to(device)
 
             outputs = model(images)
             loss = criterion(outputs, masks.float())
             total_loss += loss.item()
-            
-            if phase == 'train':
+
+            if phase == "train":
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -267,7 +369,7 @@ def run_one_epoch(
     avg_loss = total_loss / len(data_loader)
     avg_iou = total_iou / len(data_loader)
 
-    return {'loss': avg_loss, 'iou': avg_iou}
+    return {"loss": avg_loss, "iou": avg_iou}
 
 
 def train_and_validate(
@@ -278,7 +380,7 @@ def train_and_validate(
     valid_loader: DataLoader,
     device: torch.device,
     num_epochs: int,
-    save_path: str = "best_model.pth"
+    save_path: str = "best_model.pth",
 ) -> None:
     """
     Выполняет обучение и валидацию модели на нескольких эпохах.
@@ -293,11 +395,11 @@ def train_and_validate(
         num_epochs (int): Количество эпох.
         save_path (str): Путь для сохранения лучших весов модели. По умолчанию "best_model.pth".
     """
-    ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_dir = f"runs/ep{num_epochs}_{ts}"
     os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
-    
+
     best_val_loss = float("inf")
 
     # Основной цикл обучения с tqdm
@@ -309,7 +411,7 @@ def train_and_validate(
             data_loader=train_loader,
             phase="train",
             device=device,
-            current_epoch=epoch
+            current_epoch=epoch,
         )
         valid_result = run_one_epoch(
             model=model,
@@ -318,27 +420,31 @@ def train_and_validate(
             data_loader=valid_loader,
             phase="valid",
             device=device,
-            current_epoch=epoch
+            current_epoch=epoch,
         )
 
         # Сохранение лучших весов модели
-        if valid_result['loss'] < best_val_loss:
-            best_val_loss = valid_result['loss']
+        if valid_result["loss"] < best_val_loss:
+            best_val_loss = valid_result["loss"]
             torch.save(model.state_dict(), save_path)
 
         # Логгирование потерь для текущей эпохи
-        writer.add_scalar('Loss/train', train_result['loss'], epoch)
-        writer.add_scalar('Loss/valid', valid_result['loss'], epoch)
-        writer.add_scalar('IoU/train', train_result['iou'], epoch)
-        writer.add_scalar('IoU/valid', valid_result['iou'], epoch)
-        print(f"Epoch {epoch:02d}/{num_epochs} - Train Loss: {train_result['loss']:.4f}, "
-              f"Valid Loss: {valid_result['loss']:.4f}, Train IoU: {train_result['iou']:.4f}, "
-              f"Valid IoU: {valid_result['iou']:.4f}")
+        writer.add_scalar("Loss/train", train_result["loss"], epoch)
+        writer.add_scalar("Loss/valid", valid_result["loss"], epoch)
+        writer.add_scalar("IoU/train", train_result["iou"], epoch)
+        writer.add_scalar("IoU/valid", valid_result["iou"], epoch)
+        print(
+            f"Epoch {epoch:02d}/{num_epochs} - Train Loss: {train_result['loss']:.4f}, "
+            f"Valid Loss: {valid_result['loss']:.4f}, Train IoU: {train_result['iou']:.4f}, "
+            f"Valid IoU: {valid_result['iou']:.4f}"
+        )
 
     print("Обучение завершено.")
 
 
-def __collect_examples(data_loader: DataLoader, num_examples: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def __collect_examples(
+    data_loader: DataLoader, num_examples: int
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Собирает необходимое количество примеров из DataLoader, запрашивая дополнительные батчи, если необходимо.
 
@@ -347,7 +453,7 @@ def __collect_examples(data_loader: DataLoader, num_examples: int) -> Tuple[torc
         num_examples (int): Количество примеров для сбора.
 
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: Тензоры изображений и масок, содержащие num_examples примеров.
+        tuple(torch.Tensor, torch.Tensor): Тензоры изображений и масок, содержащие num_examples примеров.
     """
     images_list, masks_list = [], []
     data_iter = iter(data_loader)
@@ -383,8 +489,12 @@ def show_examples(data_loader: DataLoader, num_examples: int = 3):
 
     # Если запрашиваемое число примеров превышает доступное, выводим предупреждение
     if num_examples > dataset_size:
-        print(f"Запрошено {num_examples} примеров, но в наборе данных доступно только {dataset_size}.")
-        print(f"Показываю максимально доступное количество примеров: {dataset_size}.")
+        print(
+            f"Запрошено {num_examples} примеров, но в наборе данных доступно только {dataset_size}."
+        )
+        print(
+            f"Показываю максимально доступное количество примеров: {dataset_size}."
+        )
         num_examples = dataset_size
 
     # Получаем изображения и маски с помощью collect_examples
@@ -396,8 +506,10 @@ def show_examples(data_loader: DataLoader, num_examples: int = 3):
     axes[0, 0].set_title("Изображение")
     axes[0, 1].set_title("Маска")
     for i in range(num_examples):
-        img = images[i].permute(1, 2, 0).cpu().numpy()  # Переставляем оси для matplotlib
-        mask = masks[i].squeeze().cpu().numpy()         # Извлекаем маску
+        img = (
+            images[i].permute(1, 2, 0).cpu().numpy()
+        )  # Переставляем оси для matplotlib
+        mask = masks[i].squeeze().cpu().numpy()  # Извлекаем маску
 
         axes[i, 0].imshow(img)
         axes[i, 0].axis("off")
@@ -414,8 +526,8 @@ def __collect_segmentation_examples(
     model: torch.nn.Module,
     data_loader: DataLoader,
     device: torch.device,
-    num_examples: int
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_examples: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Собирает необходимое количество примеров для сегментации, включая предсказанные маски.
 
@@ -426,7 +538,7 @@ def __collect_segmentation_examples(
         num_examples (int): Количество примеров для сбора.
 
     Returns:
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Тензоры изображений, истинных и предсказанных масок.
+        tuple(torch.Tensor, torch.Tensor, torch.Tensor): Тензоры изображений, истинных и предсказанных масок.
     """
     images_list, masks_list, outputs_list = [], [], []
     model.eval()
@@ -458,14 +570,16 @@ def __collect_segmentation_examples(
 
     return images, masks, outputs
 
+
 def show_segmentation_results(
     model: torch.nn.Module,
     data_loader: DataLoader,
     device: torch.device,
-    num_examples: int = 3
+    num_examples: int = 3,
 ):
     """
-    Отображает результаты сегментации тестовых данных, включая исходное изображение, предсказанную маску и целевую маску.
+    Отображает результаты сегментации тестовых данных, включая исходное
+        изображение, предсказанную маску и целевую маску.
 
     Args:
         model (torch.nn.Module): Обученная модель для сегментации.
@@ -478,12 +592,18 @@ def show_segmentation_results(
 
     # Если запрашиваемое число примеров превышает доступное, выводим предупреждение
     if num_examples > dataset_size:
-        print(f"Запрошено {num_examples} примеров, но в наборе данных доступно только {dataset_size}.")
-        print(f"Показываю максимально доступное количество примеров: {dataset_size}.")
+        print(
+            f"Запрошено {num_examples} примеров, но в наборе данных доступно только {dataset_size}."
+        )
+        print(
+            f"Показываю максимально доступное количество примеров: {dataset_size}."
+        )
         num_examples = dataset_size
 
     # Получаем изображения, истинные маски и предсказанные маски
-    images, masks, outputs = __collect_segmentation_examples(model, data_loader, device, num_examples)
+    images, masks, outputs = __collect_segmentation_examples(
+        model, data_loader, device, num_examples
+    )
 
     fig, axes = plt.subplots(num_examples, 3, figsize=(15, num_examples * 5))
     fig.suptitle("Результаты сегментации", fontsize=16, y=0.98)
@@ -492,9 +612,13 @@ def show_segmentation_results(
     axes[0, 1].set_title("Истинная маска")
     axes[0, 2].set_title("Предсказанная маска")
     for i in range(num_examples):
-        img = images[i].permute(1, 2, 0).cpu().numpy()         # Перестановка осей для корректного отображения
-        true_mask = masks[i].squeeze().cpu().numpy()           # Истинная маска
-        pred_mask = torch.sigmoid(outputs[i]).squeeze().cpu().numpy()  # Предсказанная маска
+        img = (
+            images[i].permute(1, 2, 0).cpu().numpy()
+        )  # Перестановка осей для корректного отображения
+        true_mask = masks[i].squeeze().cpu().numpy()  # Истинная маска
+        pred_mask = (
+            torch.sigmoid(outputs[i]).squeeze().cpu().numpy()
+        )  # Предсказанная маска
         pred_mask = (pred_mask > 0.5).astype(np.float32)
 
         # Отображаем исходное изображение
@@ -522,7 +646,7 @@ def main(batch_size: int, num_epochs: int, model_save_path: str):
         model_save_path (str): Путь для сохранения лучших весов модели.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f'Обучение будет проходить на [{device}].')
+    print(f"Обучение будет проходить на [{device}].")
 
     model = UNet(in_channels=3, out_channels=1).to(device)
 
@@ -535,8 +659,12 @@ def main(batch_size: int, num_epochs: int, model_save_path: str):
     preprocess = get_preprocess()
 
     # Создание наборов данных
-    train_dataset = get_train_dataset(transform=train_transform, preprocess=preprocess)
-    valid_dataset = get_valid_dataset(transform=valid_test_transform, preprocess=preprocess)
+    train_dataset = get_train_dataset(
+        transform=train_transform, preprocess=preprocess
+    )
+    valid_dataset = get_valid_dataset(
+        transform=valid_test_transform, preprocess=preprocess
+    )
 
     # Создание загрузчиков данных
     train_loader, valid_loader = create_dataloaders(
@@ -548,8 +676,14 @@ def main(batch_size: int, num_epochs: int, model_save_path: str):
 
     # Обучение и валидация
     train_and_validate(
-        model, criterion, optimizer,
-        train_loader, valid_loader, device, num_epochs, model_save_path
+        model,
+        criterion,
+        optimizer,
+        train_loader,
+        valid_loader,
+        device,
+        num_epochs,
+        model_save_path,
     )
 
     # Тестирование с лучшими весами
@@ -560,16 +694,17 @@ def main(batch_size: int, num_epochs: int, model_save_path: str):
         optimizer=optimizer,
         data_loader=valid_loader,
         phase="test",
-        device=device
+        device=device,
     )
-    print(f"\nTest Loss: {test_result['loss']:.4f}, Average Jaccard Index (IoU): {test_result['iou']:.4f}")
+    print(
+        f"\nTest Loss: {test_result['loss']:.4f}, Average Jaccard Index (IoU): {test_result['iou']:.4f}"
+    )
 
     # Визуализации результатов на тестовых данных
     show_segmentation_results(model, valid_loader, device, num_examples=2)
 
 
-
 if __name__ == "__main__":
     ensure_glioma_mini()
-    os.makedirs('weights', exist_ok=True)
-    main(batch_size=1, num_epochs=90, model_save_path='weights/best_model.pth')
+    os.makedirs("weights", exist_ok=True)
+    main(batch_size=1, num_epochs=90, model_save_path="weights/best_model.pth")
