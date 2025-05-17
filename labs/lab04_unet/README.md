@@ -3,6 +3,7 @@
 ---
 
 ## Запуск обучения
+
 Выполните команду:
 
 ```bash
@@ -16,10 +17,11 @@ uv run unet.py
 ---
 
 ## Просмотр логов
+
 Для визуализации метрик обучения и графиков откройте TensorBoard:
 
 ```bash
-tensorboard --logdir runs/
+uv run -- tensorboard --logdir ./runs
 ```
 
-- В веб-браузере перейдите по адресу http://localhost:6006/
+- В веб-браузере перейдите по адресу <http://localhost:6006/>

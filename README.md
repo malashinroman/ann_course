@@ -4,39 +4,40 @@
 
 ## Установка
 
-#### 0. Установка uv
-   Следуйте официальному руководству: [https://docs.astral.sh/uv/](https://docs.astral.sh/uv/) или выполните команды ниже:
+### 0. Установка uv
 
-   **Linux / macOS**
+Следуйте официальному руководству: [https://docs.astral.sh/uv/](https://docs.astral.sh/uv/) или выполните команды ниже:
 
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
+#### Linux / macOS
 
-   **Windows**
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
-   ```powershell
-   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-   ```
+#### Windows
 
-   После установки проверьте версию:
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
 
-   ```bash
-   uv --version
-   ```
+После установки проверьте версию:
 
-#### 1. Клонирование репозитория
+```bash
+uv --version
+```
 
-   ```bash
-   git clone https://github.com/malashinroman/ann_course.git
-   cd ann_course
-   ```
+### 1. Клонирование репозитория
 
-#### 2. Установка зависимостей
+```bash
+git clone https://github.com/malashinroman/ann_course.git
+cd ann_course
+```
 
-   ```bash
-   uv sync
-   ```
+### 2. Установка зависимостей
+
+```bash
+uv sync
+```
 
 ---
 
