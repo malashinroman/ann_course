@@ -48,13 +48,19 @@ def download_from_zenodo(
 
 
 def extract_zip(archive_path: Path, extract_dir: Path) -> None:
-    """Распаковывает zip-архив archive_path в папку extract_dir.
+    """
+    Распаковывает zip-архив archive_path в папку extract_dir,
+    но пропускает распаковку, если папка уже существует и не пуста.
 
     Args:
         archive_path (Path): Путь к zip-файлу.
         extract_dir (Path): Папка для распаковки содержимого.
-
     """
+    # Если папка существует и содержит файлы/папки — выходим без распаковки
+    if extract_dir.exists() and any(extract_dir.iterdir()):
+        return
+
+    # Иначе создаём папку (если её ещё нет) и распаковываем
     extract_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive_path, "r") as z:
         z.extractall(path=extract_dir)
@@ -96,14 +102,18 @@ def ensure_glioma_mini(
     data_dir = glioma_root / "data"
     extract_zip(archive_path, data_dir)
 
-    # Проверяем наличие папки train
+    # Проверяем наличие и содержимое папки train
     train_dir = data_dir / "train"
     if not train_dir.is_dir():
         raise FileNotFoundError(f"Не найдена папка: {train_dir}")
+    if not any(train_dir.iterdir()):
+        raise FileNotFoundError(f"Папка пуста: {train_dir}")
 
-    # Проверяем наличие папки valid
+    # Проверяем наличие и содержимое папки valid
     valid_dir = data_dir / "valid"
     if not valid_dir.is_dir():
         raise FileNotFoundError(f"Не найдена папка: {valid_dir}")
+    if not any(valid_dir.iterdir()):
+        raise FileNotFoundError(f"Папка пуста: {valid_dir}")
 
     return data_dir
