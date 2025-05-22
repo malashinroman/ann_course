@@ -430,7 +430,8 @@ class ReceptiveFieldAnalyzer:
             None
         """
         # Создаем папку для сохранения изображений
-        os.makedirs("images", exist_ok=True)
+        output_folder = 'outputs'
+        os.makedirs(output_folder, exist_ok=True)
         # Запускаем все тесты для выбранных клеток
         for cell_type, cell in self.cells.items():
             if cell_types is None or cell_type in cell_types:
@@ -438,33 +439,33 @@ class ReceptiveFieldAnalyzer:
                 map_img = self.check_point_response(cell_type, cell, point_field)
                 plt.title(cell_type)
                 plt.imshow(map_img)
-                plt.savefig(f"images/{cell_type}_point.png")
+                plt.savefig(f"{output_folder}/{cell_type}_point.png")
                 plt.show()
                 
                 # Нормализованный вариант
                 norm_img = cv2.normalize(map_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U) # type: ignore
                 norm_img[norm_img == norm_img[0,0]] = 0
-                cv2.imwrite(f"images/{cell_type}_point_norm.png", norm_img)
+                cv2.imwrite(f"{output_folder}/{cell_type}_point_norm.png", norm_img)
                 
                 # Отклик на вращающуюся линию
                 res, angles = self.rotate_line_response(cell, length, step_angle)
                 plt.title(f"{cell_type} rotate")
                 plt.plot(angles, res)
-                plt.savefig(f"images/{cell_type}_rotate.png")
+                plt.savefig(f"{output_folder}/{cell_type}_rotate.png")
                 plt.show()
                 
                 # Отклик на сдвигающуюся линию
                 res_s, shifts = self.shift_line_response(cell, max_shift)
                 plt.title(f"{cell_type} shift")
                 plt.plot(shifts, res_s)
-                plt.savefig(f"images/{cell_type}_shift.png")
+                plt.savefig(f"{output_folder}/{cell_type}_shift.png")
                 plt.show()
                 
                 # Отклик на круг
                 circle_res = self.check_circle_response(cell, max_radius)
                 plt.title(f"{cell_type} circle")
                 plt.plot(list(range(max_radius)), circle_res)
-                plt.savefig(f"images/{cell_type}_circle.png")
+                plt.savefig(f"{output_folder}/{cell_type}_circle.png")
                 plt.show()
 
 
