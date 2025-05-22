@@ -7,6 +7,8 @@ import numpy as np                                      # для численн�
 import matplotlib.pyplot as plt                         # для визуализации результатов
 from tqdm import tqdm
 
+import utils
+
 
 # Константы ориентации
 ORIENTATION_VERTICAL = 'vertical'
@@ -443,8 +445,9 @@ class ReceptiveFieldAnalyzer:
                 plt.show()
                 
                 # Нормализованный вариант
-                norm_img = cv2.normalize(map_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U) # type: ignore
+                norm_img = cv2.normalize(map_img, None, 75, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U) # type: ignore
                 norm_img[norm_img == norm_img[0,0]] = 0
+                norm_img = utils.stretch_image(norm_img, anchors=(0,255), min_gap=10)
                 cv2.imwrite(f"{output_folder}/{cell_type}_point_norm.png", norm_img)
                 
                 # Отклик на вращающуюся линию
