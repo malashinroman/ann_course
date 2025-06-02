@@ -10,3 +10,5 @@ mnist/
 cifar10/
 runs/
 weights/
+images/
+outputs/
